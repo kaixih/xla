@@ -730,7 +730,7 @@ ENTRY main.12 {
 
 TEST_F(CollectiveOpsTestE2E, Bar) {
   absl::string_view kModuleReplicatedStr = R"(
-HloModule module, entry_computation_layout={{(bf16[3,128,128], bf16[3,1,32,128])->bf16[3,128,128]}, allow_spmd_sharding_propagation_to_parameters={false,false,false,false}, replica_count=4
+HloModule module, entry_computation_layout={{(bf16[3,128,128], bf16[3,1,32,128])->bf16[3,128,128]}, allow_spmd_sharding_propagation_to_parameters={false,false}, replica_count=4
 
 add {
   lhs = bf16[] parameter(0)
