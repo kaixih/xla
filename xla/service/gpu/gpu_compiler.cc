@@ -983,9 +983,9 @@ absl::Status RunLayoutAssignmentPasses(HloModule* hlo_module,
   // be flattened.
   pipeline.AddPass<FlattenCallGraph>();
   ChannelLayoutConstraints layout_constraints;
-  pipeline.AddPass<GpuLayoutAssignment>(
-      hlo_module->mutable_entry_computation_layout(), gpu_version, dnn_version,
-      &layout_constraints);
+  // pipeline.AddPass<GpuLayoutAssignment>(
+      // hlo_module->mutable_entry_computation_layout(), gpu_version, dnn_version,
+      // &layout_constraints);
   // Run SubByteNormalization because GpuLayoutAssignment may modify a
   // Layout's element_size_in_bits field.
   pipeline.AddPass<SubByteNormalization>(
