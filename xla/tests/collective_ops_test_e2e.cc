@@ -727,5 +727,168 @@ ENTRY main.12 {
     EXPECT_TRUE(LiteralTestUtil::Near(ref_results[i], results[i], error_spec));
   }
 }
+
+TEST_F(CollectiveOpsTestE2E, Bar) {
+  absl::string_view kModuleReplicatedStr = R"(
+HloModule module, entry_computation_layout={{(bf16[3,128,128], bf16[3,1,32,128])->bf16[3,128,128]}, allow_spmd_sharding_propagation_to_parameters={false,false,false,false}, replica_count=4
+
+add {
+  lhs = bf16[] parameter(0)
+  rhs = bf16[] parameter(1)
+  ROOT add = bf16[] add(lhs, rhs)
+}
+
+while_cond {
+  param = (s32[], bf16[3,128,128], bf16[3,1,32,128]) parameter(0)
+  gte = s32[] get-tuple-element(param), index=0
+  constant.1 = s32[] constant(3)
+  ROOT cmp = pred[] compare(gte, constant.1), direction=LT
+}
+
+while_body {
+  param = (s32[], bf16[3,128,128], bf16[3,1,32,128]) parameter(0)
+  get-tuple-element.394 = s32[] get-tuple-element(param), index=0
+  get-tuple-element.395 = bf16[3,128,128] get-tuple-element(param), index=1
+  get-tuple-element.k = bf16[3,1,32,128] get-tuple-element(param), index=2
+  constant.2561 = s32[] constant(0)
+  constant.2557 = s32[] constant(1)
+  add.230 = s32[] add(get-tuple-element.394, constant.2557)
+  constant.2559 = s32[] constant(3)
+  subtract.139 = s32[] subtract(constant.2559, get-tuple-element.394)
+  constant.2560 = s32[] constant(-1)
+  add.231 = s32[] add(subtract.139, constant.2560)
+  compare.747 = pred[] compare(add.231, constant.2561), direction=LT
+  constant.2562 = s32[] constant(2)
+  add.232 = s32[] add(subtract.139, constant.2562)
+  select.1348 = s32[] select(compare.747, add.232, add.231)
+  dynamic-slice.k = bf16[1,1,32,128] dynamic-slice(get-tuple-element.k, select.1348, constant.2561, constant.2561, constant.2561), dynamic_slice_sizes={1,1,32,128}
+  r = bf16[1,32,128] reshape(dynamic-slice.k)
+  a = bf16[1,32,128] add(r, r), control-predecessors={constant.2559}
+  qa = f8e4m3fn[1,32,128] convert(a)
+  a1 = bf16[1,32,128] convert(qa)
+  ag = bf16[1,128,128] all-gather(a1), dimensions={1}, replica_groups={{0,1,2,3}}
+  dynamic-slice.99 = bf16[1,128,128] dynamic-slice(get-tuple-element.395, select.1348, constant.2561, constant.2561), dynamic_slice_sizes={1,128,128}
+  ma = bf16[128,128] bitcast(dynamic-slice.99)
+  mb = bf16[128,128] bitcast(ag)
+  mc = bf16[128,128] dot(ma, mb), lhs_contracting_dims={1}, rhs_contracting_dims={0}
+  mul = bf16[1,128,128] bitcast(mc)
+  ar.1 = bf16[1,128,128] all-reduce(mul), replica_groups={}, to_apply=add, channel_id=1
+  dynamic-update-slice.35 = bf16[3,128,128] dynamic-update-slice(get-tuple-element.395, mul, select.1348, constant.2561, constant.2561)
+  ROOT tuple = (s32[], bf16[3,128,128], bf16[3,1,32,128]) tuple(add.230, dynamic-update-slice.35, get-tuple-element.k), control-predecessors={a}
+}
+
+ENTRY entry {
+  c0 = s32[] constant(0)
+  p0 = bf16[3,128,128] parameter(0)
+  p1 = bf16[3,1,32,128] parameter(1)
+  tuple = (s32[], bf16[3,128,128], bf16[3,1,32,128]) tuple(c0, p0, p1)
+  while = (s32[], bf16[3,128,128], bf16[3,1,32,128]) while(tuple), condition=while_cond, body=while_body
+  ROOT gte1 = bf16[3,128,128] get-tuple-element(while), index=1
+}
+)";
+
+  const int64_t kNumReplicas = 4;
+  const int64_t kNumPartitions = 1;
+
+  HloModuleConfig config =
+      GetModuleConfigForTest(/*replica_count=*/kNumReplicas);
+  auto opts = GetDebugOptionsForTest();
+  opts.set_xla_gpu_threshold_for_windowed_einsum_mib(0);
+  opts.set_xla_gpu_multi_streamed_windowed_einsum(true);
+  opts.set_xla_gpu_graph_min_graph_size(200);
+  opts.set_xla_gpu_enable_triton_gemm(false);
+  config.set_debug_options(opts);
+  config.set_num_partitions(kNumPartitions);
+  TF_ASSERT_OK_AND_ASSIGN(
+      auto module, ParseAndReturnVerifiedModule(kModuleReplicatedStr, config));
+  DeviceAssignment assn(/*replica_count=*/kNumReplicas,
+                        /*computation_count=*/kNumPartitions);
+  config.set_replica_count(kNumReplicas);
+  for (int64_t i = 0; i < kNumPartitions; ++i) {
+    assn(0, i) = i;
+  }
+
+  auto fake_arguments = xla::MakeFakeArguments(module.get()).value();
+  std::vector<Literal*> fake_ptrs(fake_arguments.size());
+  for (int i = 0; i < fake_arguments.size(); i++) {
+    fake_ptrs[i] = &fake_arguments[i];
+  }
+
+  TF_ASSERT_OK_AND_ASSIGN(
+      std::vector<Literal> results,
+      HloTestBase::ExecuteReplicated(
+          std::move(module), fake_ptrs, kNumPartitions, &assn,
+          true /*run_hlo_passes*/, true /*use-threads*/));
+  ASSERT_EQ(results.size(), kNumPartitions);
+}
+
+TEST_F(CollectiveOpsTestE2E, Foo) {
+  absl::string_view kModuleReplicatedStr = R"(
+HloModule pjit_foo, entry_computation_layout={(s32[4,2]{1,0})->s32[4,4,2]{2,1,0}}, allow_spmd_sharding_propagation_to_output={true}, replica_count=4
+
+sum.20 {
+  x.21 = s32[] parameter(0)
+  y.22 = s32[] parameter(1)
+  ROOT add.23 = s32[] add(x.21, y.22)
+}
+
+ENTRY main.25 {
+  constant.2 = s32[] constant(0)
+  broadcast.3 = s32[4,4,2]{2,1,0} broadcast(constant.2), dimensions={}
+  Arg_0.1 = s32[4,2]{1,0} parameter(0)
+  constant.7 = s32[] constant(10)
+  broadcast.8 = s32[4,2]{1,0} broadcast(constant.7), dimensions={}
+  add.9 = s32[4,2]{1,0} add(Arg_0.1, broadcast.8), metadata={op_name="pjit(foo)/jit(main)/add" source_file="/home/tmp/move_cp_post_layout/psum.py" source_line=29}
+  replica-id.10 = u32[] replica-id(), metadata={op_name="pjit(foo)/jit(main)/xla_pmap[backend=None axis_name=i axis_size=4 global_axis_size=4 devices=None in_axes=(0,) name=<lambda> donated_invars=(False,) is_explicit_global_axis_size=False out_axes=(0,)]" source_file="/home/tmp/move_cp_post_layout/psum.py" source_line=31}
+  constant.5 = u32[] constant(1)
+  divide.11 = u32[] divide(replica-id.10, constant.5), metadata={op_name="pjit(foo)/jit(main)/xla_pmap[backend=None axis_name=i axis_size=4 global_axis_size=4 devices=None in_axes=(0,) name=<lambda> donated_invars=(False,) is_explicit_global_axis_size=False out_axes=(0,)]" source_file="/home/tmp/move_cp_post_layout/psum.py" source_line=31}
+  constant.4 = u32[] constant(4)
+  remainder.12 = u32[] remainder(divide.11, constant.4), metadata={op_name="pjit(foo)/jit(main)/xla_pmap[backend=None axis_name=i axis_size=4 global_axis_size=4 devices=None in_axes=(0,) name=<lambda> donated_invars=(False,) is_explicit_global_axis_size=False out_axes=(0,)]" source_file="/home/tmp/move_cp_post_layout/psum.py" source_line=31}
+  constant.6 = u32[] constant(0)
+  dynamic-slice.13 = s32[1,2]{1,0} dynamic-slice(add.9, remainder.12, constant.6), dynamic_slice_sizes={1,2}, metadata={op_name="pjit(foo)/jit(main)/xla_pmap[backend=None axis_name=i axis_size=4 global_axis_size=4 devices=None in_axes=(0,) name=<lambda> donated_invars=(False,) is_explicit_global_axis_size=False out_axes=(0,)]" source_file="/home/tmp/move_cp_post_layout/psum.py" source_line=31}
+  all-gather.14 = s32[4,2]{1,0} all-gather(dynamic-slice.13), replica_groups={{0,1,2,3}}, dimensions={0}, metadata={op_name="pjit(foo)/jit(main)/pmap(<lambda>)/all_gather[all_gather_dimension=0 axis_name=i axis_index_groups=None axis_size=4 tiled=False]" source_file="/home/tmp/move_cp_post_layout/psum.py" source_line=31}
+  broadcast.18 = s32[1,4,2]{2,1,0} broadcast(all-gather.14), dimensions={1,2}, metadata={op_name="pjit(foo)/jit(main)/xla_pmap[backend=None axis_name=i axis_size=4 global_axis_size=4 devices=None in_axes=(0,) name=<lambda> donated_invars=(False,) is_explicit_global_axis_size=False out_axes=(0,)]" source_file="/home/tmp/move_cp_post_layout/psum.py" source_line=31}
+  replica-id.15 = u32[] replica-id(), metadata={op_name="pjit(foo)/jit(main)/xla_pmap[backend=None axis_name=i axis_size=4 global_axis_size=4 devices=None in_axes=(0,) name=<lambda> donated_invars=(False,) is_explicit_global_axis_size=False out_axes=(0,)]" source_file="/home/tmp/move_cp_post_layout/psum.py" source_line=31}
+  divide.16 = u32[] divide(replica-id.15, constant.5), metadata={op_name="pjit(foo)/jit(main)/xla_pmap[backend=None axis_name=i axis_size=4 global_axis_size=4 devices=None in_axes=(0,) name=<lambda> donated_invars=(False,) is_explicit_global_axis_size=False out_axes=(0,)]" source_file="/home/tmp/move_cp_post_layout/psum.py" source_line=31}
+  remainder.17 = u32[] remainder(divide.16, constant.4), metadata={op_name="pjit(foo)/jit(main)/xla_pmap[backend=None axis_name=i axis_size=4 global_axis_size=4 devices=None in_axes=(0,) name=<lambda> donated_invars=(False,) is_explicit_global_axis_size=False out_axes=(0,)]" source_file="/home/tmp/move_cp_post_layout/psum.py" source_line=31}
+  dynamic-update-slice.19 = s32[4,4,2]{2,1,0} dynamic-update-slice(broadcast.3, broadcast.18, remainder.17, constant.6, constant.6), metadata={op_name="pjit(foo)/jit(main)/xla_pmap[backend=None axis_name=i axis_size=4 global_axis_size=4 devices=None in_axes=(0,) name=<lambda> donated_invars=(False,) is_explicit_global_axis_size=False out_axes=(0,)]" source_file="/home/tmp/move_cp_post_layout/psum.py" source_line=31}
+  ROOT all-reduce.24 = s32[4,4,2]{2,1,0} all-reduce(dynamic-update-slice.19), replica_groups={{0,1,2,3}}, to_apply=sum.20, metadata={op_name="pjit(foo)/jit(main)/xla_pmap[backend=None axis_name=i axis_size=4 global_axis_size=4 devices=None in_axes=(0,) name=<lambda> donated_invars=(False,) is_explicit_global_axis_size=False out_axes=(0,)]" source_file="/home/tmp/move_cp_post_layout/psum.py" source_line=31}
+} // main.25
+)";
+
+  const int64_t kNumReplicas = 4;
+  const int64_t kNumPartitions = 1;
+
+  HloModuleConfig config =
+      GetModuleConfigForTest(/*replica_count=*/kNumReplicas);
+  auto opts = GetDebugOptionsForTest();
+  opts.set_xla_gpu_threshold_for_windowed_einsum_mib(0);
+  opts.set_xla_gpu_multi_streamed_windowed_einsum(true);
+  opts.set_xla_gpu_graph_min_graph_size(200);
+  opts.set_xla_gpu_enable_triton_gemm(false);
+  config.set_debug_options(opts);
+  config.set_num_partitions(kNumPartitions);
+  TF_ASSERT_OK_AND_ASSIGN(
+      auto module, ParseAndReturnVerifiedModule(kModuleReplicatedStr, config));
+  DeviceAssignment assn(/*replica_count=*/kNumReplicas,
+                        /*computation_count=*/kNumPartitions);
+  config.set_replica_count(kNumReplicas);
+  for (int64_t i = 0; i < kNumPartitions; ++i) {
+    assn(0, i) = i;
+  }
+
+  auto fake_arguments = xla::MakeFakeArguments(module.get()).value();
+  std::vector<Literal*> fake_ptrs(fake_arguments.size());
+  for (int i = 0; i < fake_arguments.size(); i++) {
+    fake_ptrs[i] = &fake_arguments[i];
+  }
+
+  TF_ASSERT_OK_AND_ASSIGN(
+      std::vector<Literal> results,
+      HloTestBase::ExecuteReplicated(
+          std::move(module), fake_ptrs, kNumPartitions, &assn,
+          true /*run_hlo_passes*/, true /*use-threads*/));
+  ASSERT_EQ(results.size(), kNumPartitions);
+}
 }  // namespace
 }  // namespace xla

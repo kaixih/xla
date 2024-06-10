@@ -1114,17 +1114,17 @@ add {
 }
 
 while_cond {
-  param = (s32[], bf16[3,8,128], bf16[3,1,2,128]) parameter(0)
+  param = (s32[], bf16[3,128,128], bf16[3,1,32,128]) parameter(0)
   gte = s32[] get-tuple-element(param), index=0
   constant.1 = s32[] constant(3)
   ROOT cmp = pred[] compare(gte, constant.1), direction=LT
 }
 
 while_body {
-  param = (s32[], bf16[3,8,128], bf16[3,1,2,128]) parameter(0)
+  param = (s32[], bf16[3,128,128], bf16[3,1,32,128]) parameter(0)
   get-tuple-element.394 = s32[] get-tuple-element(param), index=0
-  get-tuple-element.395 = bf16[3,8,128] get-tuple-element(param), index=1
-  get-tuple-element.k = bf16[3,1,2,128] get-tuple-element(param), index=2
+  get-tuple-element.395 = bf16[3,128,128] get-tuple-element(param), index=1
+  get-tuple-element.k = bf16[3,1,32,128] get-tuple-element(param), index=2
   constant.2561 = s32[] constant(0)
   constant.2557 = s32[] constant(1)
   add.230 = s32[] add(get-tuple-element.394, constant.2557)
@@ -1136,24 +1136,29 @@ while_body {
   constant.2562 = s32[] constant(2)
   add.232 = s32[] add(subtract.139, constant.2562)
   select.1348 = s32[] select(compare.747, add.232, add.231)
-  dynamic-slice.k = bf16[1,1,2,128] dynamic-slice(get-tuple-element.k, select.1348, constant.2561, constant.2561, constant.2561), dynamic_slice_sizes={1,1,2,128}
-  r = bf16[1,2,128] reshape(dynamic-slice.k)
-  a = bf16[1,2,128] add(r, r), control-predecessors={constant.2559}
-  ag = bf16[1,8,128] all-gather(a), dimensions={1}, replica_groups={}
-  dynamic-slice.99 = bf16[1,8,128] dynamic-slice(get-tuple-element.395, select.1348, constant.2561, constant.2561), dynamic_slice_sizes={1,8,128}
-  mul = bf16[1,8,128] multiply(dynamic-slice.99, ag)
-  ar.1 = bf16[1,8,128] all-reduce(mul), replica_groups={}, to_apply=add, channel_id=1
-  dynamic-update-slice.35 = bf16[3,8,128] dynamic-update-slice(get-tuple-element.395, ar.1, select.1348, constant.2561, constant.2561)
-  ROOT tuple = (s32[], bf16[3,8,128], bf16[3,1,2,128]) tuple(add.230, dynamic-update-slice.35, get-tuple-element.k), control-predecessors={a}
+  dynamic-slice.k = bf16[1,1,32,128] dynamic-slice(get-tuple-element.k, select.1348, constant.2561, constant.2561, constant.2561), dynamic_slice_sizes={1,1,32,128}
+  r = bf16[1,32,128] reshape(dynamic-slice.k)
+  a = bf16[1,32,128] add(r, r), control-predecessors={constant.2559}
+  qa = f8e4m3fn[1,32,128] convert(a)
+  a1 = bf16[1,32,128] convert(qa)
+  ag = bf16[1,128,128] all-gather(a1), dimensions={1}, replica_groups={}
+  dynamic-slice.99 = bf16[1,128,128] dynamic-slice(get-tuple-element.395, select.1348, constant.2561, constant.2561), dynamic_slice_sizes={1,128,128}
+  ma = bf16[128,128] bitcast(dynamic-slice.99)
+  mb = bf16[128,128] bitcast(ag)
+  mc = bf16[128,128] dot(ma, mb), lhs_contracting_dims={1}, rhs_contracting_dims={0}
+  mul = bf16[1,128,128] bitcast(mc)
+  ar.1 = bf16[1,128,128] all-reduce(mul), replica_groups={}, to_apply=add, channel_id=1
+  dynamic-update-slice.35 = bf16[3,128,128] dynamic-update-slice(get-tuple-element.395, mul, select.1348, constant.2561, constant.2561)
+  ROOT tuple = (s32[], bf16[3,128,128], bf16[3,1,32,128]) tuple(add.230, dynamic-update-slice.35, get-tuple-element.k), control-predecessors={a}
 }
 
 ENTRY entry {
   c0 = s32[] constant(0)
-  p0 = bf16[3,8,128] parameter(0)
-  p1 = bf16[3,1,2,128] parameter(1)
-  tuple = (s32[], bf16[3,8,128], bf16[3,1,2,128]) tuple(c0, p0, p1)
-  while = (s32[], bf16[3,8,128], bf16[3,1,2,128]) while(tuple), condition=while_cond, body=while_body
-  ROOT gte1 = bf16[3,8,128] get-tuple-element(while), index=1
+  p0 = bf16[3,128,128] parameter(0)
+  p1 = bf16[3,1,32,128] parameter(1)
+  tuple = (s32[], bf16[3,128,128], bf16[3,1,32,128]) tuple(c0, p0, p1)
+  while = (s32[], bf16[3,128,128], bf16[3,1,32,128]) while(tuple), condition=while_cond, body=while_body
+  ROOT gte1 = bf16[3,128,128] get-tuple-element(while), index=1
 }
 )";
   auto module = ParseAndReturnUnverifiedModule(hlo_string, config_).value();
